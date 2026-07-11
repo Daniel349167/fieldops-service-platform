@@ -1,0 +1,8 @@
+<resources>
+    <style name="Theme.FieldOps" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:statusBarColor">#102A2B</item>
+        <item name="android:navigationBarColor">#F5F7F4</item>
+    </style>
+</resources>

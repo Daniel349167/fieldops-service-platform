@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600" viewBox="0 0 900 600" role="img" aria-labelledby="title desc">
+  <title id="title">Tablero eléctrico inspeccionado</title>
+  <desc id="desc">Representación de un tablero eléctrico con elementos de medición.</desc>
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#253733"/><stop offset="1" stop-color="#0c1513"/></linearGradient></defs>
+  <rect width="900" height="600" fill="url(#bg)"/>
+  <rect x="185" y="70" width="530" height="460" rx="18" fill="#d9dedb" stroke="#8b9994" stroke-width="8"/>
+  <rect x="235" y="125" width="430" height="340" rx="10" fill="#18231f"/>
+  <g fill="#cbd4d0"><rect x="275" y="165" width="140" height="55" rx="8"/><rect x="485" y="165" width="140" height="55" rx="8"/></g>
+  <g fill="#80a89c"><circle cx="305" cy="285" r="24"/><circle cx="385" cy="285" r="24"/><circle cx="515" cy="285" r="24"/><circle cx="595" cy="285" r="24"/></g>
+  <g stroke="#d8a95c" stroke-width="12" stroke-linecap="round"><path d="M305 330v80"/><path d="M385 330v80"/><path d="M515 330v80"/><path d="M595 330v80"/></g>
+  <rect x="350" y="490" width="200" height="12" rx="6" fill="#8b9994"/>
+</svg>

@@ -1,0 +1,136 @@
+name: Verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api:
+    name: Laravel API
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: fieldops
+          POSTGRES_USER: fieldops
+          POSTGRES_PASSWORD: fieldops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fieldops -d fieldops"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, pdo_pgsql, pdo_sqlite
+          coverage: none
+          tools: composer:v2
+
+      - name: Validate Composer files
+        run: composer validate --strict --no-check-publish
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Audit locked dependencies
+        run: composer audit --locked
+
+      - name: Check formatting
+        run: vendor/bin/pint --test
+
+      - name: Run test suite
+        run: php artisan test
+
+      - name: Verify PostgreSQL migrations and seed data
+        env:
+          APP_ENV: testing
+          APP_KEY: base64:ZmllbGRvcHMtZGVtby1rZXktMjAyNi0xMjM0NTY3ODk=
+          DB_CONNECTION: pgsql
+          DB_HOST: 127.0.0.1
+          DB_PORT: '5432'
+          DB_DATABASE: fieldops
+          DB_USERNAME: fieldops
+          DB_PASSWORD: fieldops
+          CACHE_STORE: array
+          QUEUE_CONNECTION: sync
+          SESSION_DRIVER: array
+        run: php artisan migrate:fresh --seed --force
+
+  admin:
+    name: Vue admin
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/admin
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/admin/package-lock.json
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+        env:
+          VITE_DEMO_MODE: 'true'
+
+  android:
+    name: Android mobile
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/mobile
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make wrapper executable
+        run: chmod +x gradlew
+
+      - name: Test, lint and assemble demo APK
+        run: ./gradlew testDebugUnitTest lintDebug assembleDebug --stacktrace
+
+      - name: Upload demo APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: fieldops-mobile-demo-debug
+          path: apps/mobile/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14

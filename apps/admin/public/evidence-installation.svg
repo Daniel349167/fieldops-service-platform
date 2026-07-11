@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600" viewBox="0 0 900 600" role="img" aria-labelledby="title desc">
+  <title id="title">Ajuste de conexiones eléctricas</title>
+  <desc id="desc">Representación de herramientas y conexiones verificadas.</desc>
+  <defs><linearGradient id="bg2" x1="0" y1="1" x2="1" y2="0"><stop stop-color="#182824"/><stop offset="1" stop-color="#526c64"/></linearGradient></defs>
+  <rect width="900" height="600" fill="url(#bg2)"/>
+  <rect x="130" y="90" width="640" height="420" rx="24" fill="#d7ddd9"/>
+  <g stroke="#22332f" stroke-width="22" stroke-linecap="round"><path d="M245 170v260"/><path d="M375 170v260"/><path d="M505 170v260"/><path d="M635 170v260"/></g>
+  <g fill="#d89a55"><circle cx="245" cy="245" r="32"/><circle cx="375" cy="330" r="32"/><circle cx="505" cy="245" r="32"/><circle cx="635" cy="330" r="32"/></g>
+  <path d="M185 465h530" stroke="#80928c" stroke-width="14" stroke-linecap="round"/>
+</svg>

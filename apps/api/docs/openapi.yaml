@@ -1,0 +1,1588 @@
+openapi: 3.1.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+info:
+  title: FieldOps API
+  version: 1.0.0
+  summary: Service-order operations and offline synchronization API
+  description: |
+    REST API used by the FieldOps operations dashboard and mobile application.
+
+    The API uses Laravel Sanctum bearer tokens with role-specific abilities. All
+    protected resources are scoped to the authenticated user: administrators can
+    operate on every order, while technicians can only read and execute work
+    assigned to them.
+
+    Mutable work orders and evidences expose a monotonically increasing `version`.
+    Clients must send the version they last read on update, transition, and delete
+    operations. A stale write is rejected with `409 version_conflict`.
+
+    The three `POST` mutation endpoints accept an optional `Idempotency-Key`.
+    A successful replay returns the original status and body plus
+    `Idempotency-Replayed: true`. Keys are scoped to the authenticated user,
+    retained for 24 hours, and cannot be reused for another path, method, or payload.
+  contact:
+    name: Daniel Ureta
+    url: https://daniel349167.github.io/
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: http://127.0.0.1:8000/api/v1
+    description: Local development
+tags:
+  - name: Authentication
+    description: Issue, inspect, and revoke Sanctum access tokens.
+  - name: Dashboard
+    description: Role-scoped operational totals and recent activity.
+  - name: Technicians
+    description: Administrative technician directory.
+  - name: Work orders
+    description: Service-order search, lifecycle, assignment, and optimistic versioning.
+  - name: Evidences
+    description: Evidence metadata associated with a service order.
+  - name: Timeline
+    description: Immutable audit events for a work order.
+  - name: Synchronization
+    description: Incremental, globally ordered changes for offline clients.
+security:
+  - bearerAuth: []
+paths:
+  /auth/login:
+    post:
+      tags: [Authentication]
+      summary: Issue an access token
+      description: |
+        Authenticates an account and issues a role-scoped Sanctum token. Tokens
+        expire after 30 days by default. This endpoint is limited to 10 requests
+        per minute per throttle key.
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            examples:
+              administrator:
+                summary: Local demo administrator
+                value:
+                  email: admin@fieldops.test
+                  password: FieldOps2026!
+                  device_name: operations-dashboard
+              technician:
+                summary: Local demo technician
+                value:
+                  email: tecnico@fieldops.test
+                  password: FieldOps2026!
+                  device_name: fieldops-android
+      responses:
+        '200':
+          description: Credentials accepted and token issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginEnvelope'
+              example:
+                data:
+                  token: 1|mF5J0ROb3Wq7ExampleOnly
+                  token_type: Bearer
+                  expires_at: '2026-08-09T15:30:00+00:00'
+                  user:
+                    id: 1
+                    name: Daniel Admin
+                    email: admin@fieldops.test
+                    role: admin
+        '401':
+          description: Email or password is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                message: The provided credentials are invalid.
+                code: invalid_credentials
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /auth/me:
+    get:
+      tags: [Authentication]
+      summary: Get the current user
+      operationId: getCurrentUser
+      responses:
+        '200':
+          description: Authenticated user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+
+  /auth/logout:
+    post:
+      tags: [Authentication]
+      summary: Revoke the current access token
+      operationId: logout
+      responses:
+        '200':
+          description: The bearer token used by this request was revoked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageEnvelope'
+              example:
+                data:
+                  message: Token revoked.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+
+  /dashboard:
+    get:
+      tags: [Dashboard]
+      summary: Get an operational overview
+      description: |
+        Returns totals and the five most recently updated orders visible to the
+        current user. Technician results only include their assigned orders.
+      operationId: getDashboard
+      responses:
+        '200':
+          description: Role-scoped dashboard data.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /technicians:
+    get:
+      tags: [Technicians]
+      summary: List technicians
+      description: Requires the administrator-only `users:read` token ability.
+      operationId: listTechnicians
+      responses:
+        '200':
+          description: Technicians ordered by name.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserCollectionEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /work-orders:
+    get:
+      tags: [Work orders]
+      summary: Search work orders
+      description: |
+        Administrators search all active orders. Technicians only receive orders
+        assigned to them. The free-text query matches title, customer name, or
+        address line. Results are ordered by most recent update.
+      operationId: listWorkOrders
+      parameters:
+        - $ref: '#/components/parameters/StatusFilter'
+        - $ref: '#/components/parameters/PriorityFilter'
+        - $ref: '#/components/parameters/TechnicianFilter'
+        - $ref: '#/components/parameters/SearchFilter'
+        - $ref: '#/components/parameters/PerPage'
+        - $ref: '#/components/parameters/Page'
+      responses:
+        '200':
+          description: Paginated orders visible to the current user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkOrderPage'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+    post:
+      tags: [Work orders]
+      summary: Create a work order
+      description: |
+        Administrator only. An order without an assignee starts as `pending`; an
+        order with a technician starts as `assigned`. The initial version is `1`.
+      operationId: createWorkOrder
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWorkOrderRequest'
+            example:
+              title: Repair connectivity in warehouse
+              description: Diagnose and restore connectivity in the loading area.
+              customer:
+                name: Acme SAC
+                phone: '+51 999 000 111'
+                email: operaciones@acme.test
+              address:
+                line: Av. Industrial 450
+                district: Ate
+                city: Lima
+                latitude: -12.0464
+                longitude: -77.0428
+              priority: urgent
+              assigned_technician_id: 2
+              scheduled_at: '2026-07-11T14:00:00-05:00'
+      responses:
+        '201':
+          description: Work order created.
+          headers:
+            Idempotency-Replayed:
+              $ref: '#/components/headers/IdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkOrderEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /work-orders/{workOrder}:
+    parameters:
+      - $ref: '#/components/parameters/WorkOrderId'
+    get:
+      tags: [Work orders]
+      summary: Get a work order
+      description: Can return an authorized soft-deleted order, including `deleted_at`.
+      operationId: getWorkOrder
+      responses:
+        '200':
+          description: Work order details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkOrderEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Work orders]
+      summary: Update or assign a work order
+      description: |
+        Administrator only. The request must contain the version last observed by
+        the client. Assignment automatically moves `pending` to `assigned`, and
+        removing the assignee moves `assigned` back to `pending`. Active orders in
+        `en_route` or `in_progress` cannot be left without a technician.
+      operationId: updateWorkOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateWorkOrderRequest'
+            examples:
+              assign:
+                value:
+                  version: 1
+                  assigned_technician_id: 2
+              edit:
+                value:
+                  version: 2
+                  title: Repair primary warehouse router
+                  priority: high
+                  scheduled_at: '2026-07-11T15:30:00-05:00'
+      responses:
+        '200':
+          description: Updated order with an incremented version.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkOrderEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+    delete:
+      tags: [Work orders]
+      summary: Soft-delete a work order
+      description: |
+        Administrator only. The JSON body carries the expected version. Deleting
+        an order increments its version and also increments and soft-deletes all
+        attached evidences. Deletions become tombstones in `/sync`.
+      operationId: deleteWorkOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionRequest'
+            example:
+              version: 3
+      responses:
+        '200':
+          description: Work order soft-deleted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteWorkOrderEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+  /work-orders/{workOrder}/transition:
+    parameters:
+      - $ref: '#/components/parameters/WorkOrderId'
+    post:
+      tags: [Work orders]
+      summary: Transition a work order
+      description: |
+        Applies one valid state-machine transition and increments the order version.
+        Technicians may only advance `assigned -> en_route -> in_progress -> completed`.
+        Administrators may use any transition declared by the state machine, including
+        rollbacks and cancellation. Completion requires at least one evidence, and
+        cancellation requires a note.
+      operationId: transitionWorkOrder
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransitionWorkOrderRequest'
+            examples:
+              technicianAdvance:
+                value:
+                  to_status: en_route
+                  version: 2
+                  note: Technician left the workshop.
+              administratorCancellation:
+                value:
+                  to_status: cancelled
+                  version: 2
+                  note: Customer cancelled the visit.
+      responses:
+        '200':
+          description: Transition applied; a repeated idempotent request keeps this response.
+          headers:
+            Idempotency-Replayed:
+              $ref: '#/components/headers/IdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkOrderEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /work-orders/{workOrder}/evidences:
+    parameters:
+      - $ref: '#/components/parameters/WorkOrderId'
+    get:
+      tags: [Evidences]
+      summary: List evidence metadata
+      description: Returns newest evidence first, 20 records per page.
+      operationId: listEvidences
+      parameters:
+        - $ref: '#/components/parameters/Page'
+      responses:
+        '200':
+          description: Paginated evidence metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvidencePage'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [Evidences]
+      summary: Register evidence metadata
+      description: |
+        Registers metadata for an already stored evidence object; this route does
+        not accept multipart file bytes. Technicians may add evidence only to an
+        order assigned to them. Closed orders (`completed` or `cancelled`) reject
+        new evidence. The evidence starts at version `1`.
+      operationId: createEvidence
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEvidenceRequest'
+            example:
+              file_name: network-rack.jpg
+              mime_type: image/jpeg
+              size_bytes: 250000
+              storage_path: orders/evidence/network-rack.jpg
+              checksum: 083f20f8a4cbe1c9b874c9b839abf1ea806bf079205cb730e41ed81c9b351ecd
+              captured_at: '2026-07-10T14:20:00-05:00'
+              metadata:
+                source: mobile
+                offline: true
+                latitude: -12.0464
+                longitude: -77.0428
+                width: 1920
+                height: 1080
+      responses:
+        '201':
+          description: Evidence metadata registered.
+          headers:
+            Idempotency-Replayed:
+              $ref: '#/components/headers/IdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvidenceEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /work-orders/{workOrder}/evidences/{evidence}:
+    parameters:
+      - $ref: '#/components/parameters/WorkOrderId'
+      - $ref: '#/components/parameters/EvidenceId'
+    delete:
+      tags: [Evidences]
+      summary: Soft-delete evidence
+      description: |
+        Administrators can delete any evidence on an open order. A technician may
+        only delete evidence they uploaded on an order currently assigned to them.
+        The request version is checked optimistically. Evidence on closed orders is
+        immutable, and an evidence ID belonging to another order returns `404`.
+      operationId: deleteEvidence
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionRequest'
+            example:
+              version: 1
+      responses:
+        '200':
+          description: Evidence soft-deleted with its new version.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteEvidenceEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+  /work-orders/{workOrder}/timeline:
+    parameters:
+      - $ref: '#/components/parameters/WorkOrderId'
+    get:
+      tags: [Timeline]
+      summary: Get the work-order audit timeline
+      description: Returns audit events newest first, including actor and transition metadata.
+      operationId: getWorkOrderTimeline
+      responses:
+        '200':
+          description: Immutable audit events.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimelineEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /sync:
+    get:
+      tags: [Synchronization]
+      summary: Pull incremental changes
+      description: |
+        Returns a globally ordered window of work orders, evidences, and tombstones
+        updated after `since`. On the first page, the server freezes `meta.sync_at`
+        as the upper boundary. If `meta.has_more` is true, clients must continue with
+        the opaque `meta.next_cursor`; a cursor already contains the frozen boundary
+        and ordering position, so it should not be decoded or modified.
+
+        Deletions produce versioned tombstones with reason `deleted`. Reassignment
+        produces a `work_order` tombstone with reason `access_revoked` for the former
+        technician, allowing offline clients to remove data they may no longer read.
+        Administrator sync sees every record; technician sync is assignment-scoped.
+      operationId: synchronize
+      parameters:
+        - name: since
+          in: query
+          description: |
+            Exclusive lower timestamp for a new synchronization window. Defaults to
+            the Unix epoch. Must not be in the future. Omit when sending `cursor`.
+          schema:
+            type: string
+            format: date-time
+          example: '2026-07-10T12:00:00Z'
+        - name: cursor
+          in: query
+          description: Opaque continuation token returned as `meta.next_cursor`.
+          schema:
+            type: string
+            maxLength: 1024
+          example: eyJhdCI6IjIwMjYtMDctMTBUMTI6MDA6MDIuMDAwMDAwWiIsInJlc291cmNlIjoiZXZpZGVuY2UiLCJpZCI6IjAxSjJIOUE4UVcwRDVHUUpaNDhCMks2VzdQIiwidW50aWwiOiIyMDI2LTA3LTEwVDEyOjAwOjEwLjAwMDAwMFoifQ
+        - name: limit
+          in: query
+          description: Maximum number of changes across all resource types.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 200
+          example: 200
+      responses:
+        '200':
+          description: One synchronization page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncEnvelope'
+              example:
+                data:
+                  work_orders:
+                    - id: 01J2H8M4S6Q7Y3K5T9V1W2X3Z4
+                      title: Repair connectivity in warehouse
+                      description: Diagnose and restore connectivity.
+                      customer:
+                        name: Acme SAC
+                        phone: '+51 999 000 111'
+                        email: operaciones@acme.test
+                      address:
+                        line: Av. Industrial 450
+                        district: Ate
+                        city: Lima
+                        latitude: -12.0464
+                        longitude: -77.0428
+                      priority: urgent
+                      status: assigned
+                      assigned_technician:
+                        id: 2
+                        name: María Técnica
+                        email: tecnico@fieldops.test
+                        role: technician
+                      scheduled_at: '2026-07-11T14:00:00-05:00'
+                      version: 2
+                      created_at: '2026-07-10T12:00:00Z'
+                      updated_at: '2026-07-10T12:00:01Z'
+                      deleted_at: null
+                  evidences: []
+                  tombstones:
+                    - resource: work_order
+                      id: 01J2H7ZQ5JY4DV17S3W9J4PM5F
+                      deleted_at: '2026-07-10T12:00:02Z'
+                      version: 3
+                      reason: access_revoked
+                meta:
+                  sync_at: '2026-07-10T12:00:10Z'
+                  next_since: '2026-07-10T12:00:10Z'
+                  next_cursor: null
+                  has_more: false
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Sanctum
+      description: Token returned by `POST /auth/login`.
+
+  headers:
+    IdempotencyReplayed:
+      description: Present with value `true` only when the original JSON response is replayed.
+      schema:
+        type: string
+        const: 'true'
+
+  parameters:
+    WorkOrderId:
+      name: workOrder
+      in: path
+      required: true
+      description: Work-order ULID.
+      schema:
+        $ref: '#/components/schemas/Ulid'
+      example: 01J2H8M4S6Q7Y3K5T9V1W2X3Z4
+    EvidenceId:
+      name: evidence
+      in: path
+      required: true
+      description: Evidence ULID.
+      schema:
+        $ref: '#/components/schemas/Ulid'
+      example: 01J2H9A8QW0D5GQJZ48B2K6W7P
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Client-generated operation key, unique per authenticated user for 24 hours.
+        Reuse is valid only with the same method, path, and canonical JSON payload.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 100
+      example: mobile-01J2H9B5-create-evidence
+    StatusFilter:
+      name: status
+      in: query
+      schema:
+        $ref: '#/components/schemas/WorkOrderStatus'
+    PriorityFilter:
+      name: priority
+      in: query
+      schema:
+        $ref: '#/components/schemas/WorkOrderPriority'
+    TechnicianFilter:
+      name: assigned_technician_id
+      in: query
+      description: Administrator-side filter by assigned user ID.
+      schema:
+        type: integer
+        minimum: 1
+      example: 2
+    SearchFilter:
+      name: q
+      in: query
+      description: Search title, customer name, and address line.
+      schema:
+        type: string
+        maxLength: 100
+      example: Acme
+    PerPage:
+      name: per_page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+
+  responses:
+    Unauthenticated:
+      description: A valid bearer token is required.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            message: Authentication is required.
+            code: unauthenticated
+    Forbidden:
+      description: The token lacks the required ability or the resource is outside the user's scope.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            message: You are not allowed to perform this action.
+            code: forbidden
+    NotFound:
+      description: The resource does not exist or the route binding could not resolve it.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            message: The requested resource was not found.
+            code: not_found
+    ValidationFailed:
+      description: One or more request values are invalid, or a business invariant rejected the operation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            fieldValidation:
+              value:
+                message: The submitted data is invalid.
+                code: validation_failed
+                errors:
+                  status:
+                    - The selected status is invalid.
+            businessRule:
+              value:
+                message: At least one evidence is required before completing a work order.
+                code: evidence_required
+    Conflict:
+      description: |
+        Optimistic version conflict, idempotency-key payload/path conflict, or an
+        identical idempotent request that is still being processed.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            staleVersion:
+              value:
+                message: The work order was modified by another client. Refresh and retry.
+                code: version_conflict
+                errors:
+                  expected: 2
+                  current: 3
+            idempotencyConflict:
+              value:
+                message: This idempotency key was already used for a different request.
+                code: idempotency_conflict
+            idempotencyInProgress:
+              value:
+                message: A request with this idempotency key is already being processed.
+                code: idempotency_in_progress
+    RateLimited:
+      description: Request throttled.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            message: Too many requests. Please try again later.
+            code: rate_limited
+    ServiceUnavailable:
+      description: The idempotency key could not be reserved because of a transient concurrency failure.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            message: The request could not reserve its idempotency key.
+            code: idempotency_unavailable
+
+  schemas:
+    Ulid:
+      type: string
+      pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+      description: Universally Unique Lexicographically Sortable Identifier.
+
+    WorkOrderStatus:
+      type: string
+      enum: [pending, assigned, en_route, in_progress, completed, cancelled]
+
+    WorkOrderPriority:
+      type: string
+      enum: [low, normal, high, urgent]
+
+    UserRole:
+      type: string
+      enum: [admin, technician]
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+        device_name:
+          type: string
+          maxLength: 100
+          default: fieldops-client
+
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, name, email, role]
+      properties:
+        id:
+          type: integer
+          minimum: 1
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          $ref: '#/components/schemas/UserRole'
+
+    Customer:
+      type: object
+      additionalProperties: false
+      required: [name, phone, email]
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        phone:
+          type: [string, 'null']
+          maxLength: 40
+        email:
+          type: [string, 'null']
+          format: email
+          maxLength: 255
+
+    CustomerInput:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        phone:
+          type: [string, 'null']
+          maxLength: 40
+        email:
+          type: [string, 'null']
+          format: email
+          maxLength: 255
+
+    Address:
+      type: object
+      additionalProperties: false
+      required: [line, district, city, latitude, longitude]
+      properties:
+        line:
+          type: string
+          maxLength: 255
+        district:
+          type: [string, 'null']
+          maxLength: 120
+        city:
+          type: string
+          maxLength: 120
+        latitude:
+          type: [number, 'null']
+          minimum: -90
+          maximum: 90
+        longitude:
+          type: [number, 'null']
+          minimum: -180
+          maximum: 180
+
+    AddressInput:
+      type: object
+      additionalProperties: false
+      required: [line]
+      properties:
+        line:
+          type: string
+          maxLength: 255
+        district:
+          type: [string, 'null']
+          maxLength: 120
+        city:
+          type: string
+          maxLength: 120
+          default: Lima
+        latitude:
+          type: [number, 'null']
+          minimum: -90
+          maximum: 90
+        longitude:
+          type: [number, 'null']
+          minimum: -180
+          maximum: 180
+
+    CreateWorkOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [title, customer, address]
+      properties:
+        title:
+          type: string
+          maxLength: 255
+        description:
+          type: [string, 'null']
+          maxLength: 5000
+        customer:
+          $ref: '#/components/schemas/CustomerInput'
+        address:
+          $ref: '#/components/schemas/AddressInput'
+        priority:
+          $ref: '#/components/schemas/WorkOrderPriority'
+        assigned_technician_id:
+          type: [integer, 'null']
+          minimum: 1
+        scheduled_at:
+          type: [string, 'null']
+          format: date-time
+
+    UpdateWorkOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version:
+          type: integer
+          minimum: 1
+          description: Version last observed by the client.
+        title:
+          type: string
+          maxLength: 255
+        description:
+          type: [string, 'null']
+          maxLength: 5000
+        customer:
+          $ref: '#/components/schemas/UpdateCustomerInput'
+        address:
+          $ref: '#/components/schemas/UpdateAddressInput'
+        priority:
+          $ref: '#/components/schemas/WorkOrderPriority'
+        assigned_technician_id:
+          type: [integer, 'null']
+          minimum: 1
+        scheduled_at:
+          type: [string, 'null']
+          format: date-time
+
+    UpdateCustomerInput:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        phone:
+          type: [string, 'null']
+          maxLength: 40
+        email:
+          type: [string, 'null']
+          format: email
+          maxLength: 255
+
+    UpdateAddressInput:
+      type: object
+      additionalProperties: false
+      properties:
+        line:
+          type: string
+          maxLength: 255
+        district:
+          type: [string, 'null']
+          maxLength: 120
+        city:
+          type: string
+          maxLength: 120
+        latitude:
+          type: [number, 'null']
+          minimum: -90
+          maximum: 90
+        longitude:
+          type: [number, 'null']
+          minimum: -180
+          maximum: 180
+
+    TransitionWorkOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [to_status, version]
+      properties:
+        to_status:
+          $ref: '#/components/schemas/WorkOrderStatus'
+        version:
+          type: integer
+          minimum: 1
+          description: Version last observed by the client.
+        note:
+          type: [string, 'null']
+          maxLength: 2000
+
+    VersionRequest:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version:
+          type: integer
+          minimum: 1
+          description: Version last observed by the client.
+
+    WorkOrder:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - title
+        - description
+        - customer
+        - address
+        - priority
+        - status
+        - assigned_technician
+        - scheduled_at
+        - version
+        - created_at
+        - updated_at
+        - deleted_at
+      properties:
+        id:
+          $ref: '#/components/schemas/Ulid'
+        title:
+          type: string
+        description:
+          type: [string, 'null']
+        customer:
+          $ref: '#/components/schemas/Customer'
+        address:
+          $ref: '#/components/schemas/Address'
+        priority:
+          $ref: '#/components/schemas/WorkOrderPriority'
+        status:
+          $ref: '#/components/schemas/WorkOrderStatus'
+        assigned_technician:
+          oneOf:
+            - $ref: '#/components/schemas/User'
+            - type: 'null'
+        scheduled_at:
+          type: [string, 'null']
+          format: date-time
+        version:
+          type: integer
+          minimum: 1
+        created_at:
+          type: [string, 'null']
+          format: date-time
+        updated_at:
+          type: [string, 'null']
+          format: date-time
+        deleted_at:
+          type: [string, 'null']
+          format: date-time
+
+    EvidenceMetadata:
+      type: object
+      description: Extensible client metadata. Known mobile capture properties are constrained below.
+      properties:
+        latitude:
+          type: [number, 'null']
+          minimum: -90
+          maximum: 90
+        longitude:
+          type: [number, 'null']
+          minimum: -180
+          maximum: 180
+        width:
+          type: [integer, 'null']
+          minimum: 1
+        height:
+          type: [integer, 'null']
+          minimum: 1
+      additionalProperties: true
+
+    CreateEvidenceRequest:
+      type: object
+      additionalProperties: false
+      required: [file_name, mime_type, size_bytes, storage_path]
+      properties:
+        file_name:
+          type: string
+          maxLength: 255
+        mime_type:
+          type: string
+          enum: [image/jpeg, image/png, image/webp, image/heic]
+        size_bytes:
+          type: integer
+          minimum: 1
+          maximum: 20971520
+        storage_path:
+          type: string
+          maxLength: 500
+        checksum:
+          type: [string, 'null']
+          maxLength: 128
+        captured_at:
+          type: [string, 'null']
+          format: date-time
+        metadata:
+          oneOf:
+            - $ref: '#/components/schemas/EvidenceMetadata'
+            - type: 'null'
+
+    Evidence:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - work_order_id
+        - uploaded_by
+        - file_name
+        - mime_type
+        - size_bytes
+        - storage_path
+        - checksum
+        - captured_at
+        - metadata
+        - version
+        - created_at
+        - updated_at
+        - deleted_at
+      properties:
+        id:
+          $ref: '#/components/schemas/Ulid'
+        work_order_id:
+          $ref: '#/components/schemas/Ulid'
+        uploaded_by:
+          type: [integer, 'null']
+          minimum: 1
+        file_name:
+          type: string
+        mime_type:
+          type: string
+        size_bytes:
+          type: integer
+          minimum: 1
+        storage_path:
+          type: string
+        checksum:
+          type: [string, 'null']
+        captured_at:
+          type: [string, 'null']
+          format: date-time
+        metadata:
+          $ref: '#/components/schemas/EvidenceMetadata'
+        version:
+          type: integer
+          minimum: 1
+        created_at:
+          type: [string, 'null']
+          format: date-time
+        updated_at:
+          type: [string, 'null']
+          format: date-time
+        deleted_at:
+          type: [string, 'null']
+          format: date-time
+
+    TimelineActor:
+      type: object
+      additionalProperties: false
+      required: [id, name]
+      properties:
+        id:
+          type: integer
+          minimum: 1
+        name:
+          type: string
+
+    TimelineEvent:
+      type: object
+      additionalProperties: false
+      required: [id, type, from_status, to_status, note, metadata, actor, created_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/Ulid'
+        type:
+          type: string
+          enum: [created, updated, assignment_changed, status_changed, deleted, evidence_added, evidence_deleted]
+        from_status:
+          oneOf:
+            - $ref: '#/components/schemas/WorkOrderStatus'
+            - type: 'null'
+        to_status:
+          oneOf:
+            - $ref: '#/components/schemas/WorkOrderStatus'
+            - type: 'null'
+        note:
+          type: [string, 'null']
+        metadata:
+          type: object
+          additionalProperties: true
+        actor:
+          oneOf:
+            - $ref: '#/components/schemas/TimelineActor'
+            - type: 'null'
+        created_at:
+          type: string
+          format: date-time
+
+    DashboardSummary:
+      type: object
+      additionalProperties: false
+      required: [total, open, completed, cancelled, urgent_open, due_today]
+      properties:
+        total:
+          type: integer
+          minimum: 0
+        open:
+          type: integer
+          minimum: 0
+        completed:
+          type: integer
+          minimum: 0
+        cancelled:
+          type: integer
+          minimum: 0
+        urgent_open:
+          type: integer
+          minimum: 0
+        due_today:
+          type: integer
+          minimum: 0
+
+    StatusCounts:
+      type: object
+      additionalProperties: false
+      required: [pending, assigned, en_route, in_progress, completed, cancelled]
+      properties:
+        pending: { type: integer, minimum: 0 }
+        assigned: { type: integer, minimum: 0 }
+        en_route: { type: integer, minimum: 0 }
+        in_progress: { type: integer, minimum: 0 }
+        completed: { type: integer, minimum: 0 }
+        cancelled: { type: integer, minimum: 0 }
+
+    Tombstone:
+      type: object
+      additionalProperties: false
+      required: [resource, id, deleted_at, version, reason]
+      properties:
+        resource:
+          type: string
+          enum: [work_order, evidence]
+        id:
+          $ref: '#/components/schemas/Ulid'
+        deleted_at:
+          type: string
+          format: date-time
+          description: Deletion time, or revocation event time for `access_revoked`.
+        version:
+          type: integer
+          minimum: 1
+        reason:
+          type: string
+          enum: [deleted, access_revoked]
+
+    LoginEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [token, token_type, expires_at, user]
+          properties:
+            token:
+              type: string
+            token_type:
+              type: string
+              const: Bearer
+            expires_at:
+              type: string
+              format: date-time
+            user:
+              $ref: '#/components/schemas/User'
+
+    UserEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/User'
+
+    UserCollectionEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+
+    MessageEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [message]
+          properties:
+            message:
+              type: string
+
+    WorkOrderEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/WorkOrder'
+
+    EvidenceEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/Evidence'
+
+    DashboardEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [summary, by_status, recent_work_orders]
+          properties:
+            summary:
+              $ref: '#/components/schemas/DashboardSummary'
+            by_status:
+              $ref: '#/components/schemas/StatusCounts'
+            recent_work_orders:
+              type: array
+              maxItems: 5
+              items:
+                $ref: '#/components/schemas/WorkOrder'
+
+    TimelineEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/TimelineEvent'
+
+    DeleteWorkOrderEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [id, deleted]
+          properties:
+            id:
+              $ref: '#/components/schemas/Ulid'
+            deleted:
+              type: boolean
+              const: true
+
+    DeleteEvidenceEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [id, deleted, version]
+          properties:
+            id:
+              $ref: '#/components/schemas/Ulid'
+            deleted:
+              type: boolean
+              const: true
+            version:
+              type: integer
+              minimum: 2
+
+    PaginationLink:
+      type: object
+      additionalProperties: false
+      required: [url, label, active]
+      properties:
+        url:
+          type: [string, 'null']
+          format: uri
+        label:
+          type: string
+        active:
+          type: boolean
+
+    PaginationLinks:
+      type: object
+      additionalProperties: false
+      required: [first, last, prev, next]
+      properties:
+        first:
+          type: string
+          format: uri
+        last:
+          type: string
+          format: uri
+        prev:
+          type: [string, 'null']
+          format: uri
+        next:
+          type: [string, 'null']
+          format: uri
+
+    PaginationMeta:
+      type: object
+      additionalProperties: false
+      required: [current_page, from, last_page, links, path, per_page, to, total]
+      properties:
+        current_page: { type: integer, minimum: 1 }
+        from: { type: [integer, 'null'], minimum: 1 }
+        last_page: { type: integer, minimum: 1 }
+        links:
+          type: array
+          items:
+            $ref: '#/components/schemas/PaginationLink'
+        path:
+          type: string
+          format: uri
+        per_page: { type: integer, minimum: 1 }
+        to: { type: [integer, 'null'], minimum: 1 }
+        total: { type: integer, minimum: 0 }
+
+    WorkOrderPage:
+      type: object
+      additionalProperties: false
+      required: [data, links, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkOrder'
+        links:
+          $ref: '#/components/schemas/PaginationLinks'
+        meta:
+          $ref: '#/components/schemas/PaginationMeta'
+
+    EvidencePage:
+      type: object
+      additionalProperties: false
+      required: [data, links, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Evidence'
+        links:
+          $ref: '#/components/schemas/PaginationLinks'
+        meta:
+          $ref: '#/components/schemas/PaginationMeta'
+
+    SyncEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [work_orders, evidences, tombstones]
+          properties:
+            work_orders:
+              type: array
+              items:
+                $ref: '#/components/schemas/WorkOrder'
+            evidences:
+              type: array
+              items:
+                $ref: '#/components/schemas/Evidence'
+            tombstones:
+              type: array
+              items:
+                $ref: '#/components/schemas/Tombstone'
+        meta:
+          type: object
+          additionalProperties: false
+          required: [sync_at, next_since, next_cursor, has_more]
+          properties:
+            sync_at:
+              type: string
+              format: date-time
+            next_since:
+              type: string
+              format: date-time
+            next_cursor:
+              type: [string, 'null']
+            has_more:
+              type: boolean
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [message, code]
+      properties:
+        message:
+          type: string
+        code:
+          type: string
+          description: Stable, machine-readable error identifier.
+          examples:
+            - validation_failed
+            - version_conflict
+            - idempotency_conflict
+        errors:
+          type: object
+          description: Optional validation messages or structured conflict context.
+          additionalProperties: true
