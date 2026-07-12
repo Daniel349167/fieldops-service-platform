@@ -6,7 +6,14 @@
 
 Plataforma Full Stack para coordinar órdenes de servicio en campo: aplicación Android offline-first para técnicos, API Laravel con reglas de negocio y panel operativo Vue para supervisores.
 
-**[Abrir demo del panel](https://daniel349167.github.io/fieldops-service-platform/)** · **[Ver arquitectura](docs/ARCHITECTURE.md)**
+## Probar el proyecto
+
+| Recurso | Acceso |
+| --- | --- |
+| Panel web | **[Abrir demo navegable](https://daniel349167.github.io/fieldops-service-platform/)** |
+| Versión publicada | [Ver la release más reciente](https://github.com/Daniel349167/fieldops-service-platform/releases/latest) |
+| Aplicación Android | [Descargar APK demo v1.0.0](https://github.com/Daniel349167/fieldops-service-platform/releases/download/v1.0.0/FieldOps-demo-v1.0.0.apk) |
+| Diseño técnico | [Leer arquitectura y decisiones](docs/ARCHITECTURE.md) |
 
 > Proyecto de portafolio con datos ficticios. La demo pública se identifica como simulación y no representa operaciones ni clientes reales.
 
